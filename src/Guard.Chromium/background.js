@@ -35,7 +35,7 @@ const link = new GuardLink({
   onPolicy: (next) => {
     policy = next;
     matcher = GuardDetect.createMatcher(next);
-    syncDynamicRules(next).catch((error) => console.error('[guard] rule sync failed', error));
+    syncDynamicRules(next);
   }
 });
 
@@ -180,14 +180,39 @@ function buildRules(current) {
   return rules;
 }
 
-async function syncDynamicRules(current) {
+/*
+ * Rule updates are serialized through this chain.
+ *
+ * Both the policy push and the keepalive alarm call syncDynamicRules, and getDynamicRules and
+ * updateDynamicRules are both async. When two calls overlap, each reads the rule set before
+ * either has written, both number their rules from RULE_ID_BASE, and the second update is
+ * rejected with "Rule with id N does not have a unique ID" -- leaving the browser-level layer
+ * holding whichever policy happened to win the race rather than the current one.
+ */
+let ruleSyncChain = Promise.resolve();
+
+function syncDynamicRules(current) {
+  ruleSyncChain = ruleSyncChain
+    .then(() => applyDynamicRules(current))
+    .catch((error) => console.error('[guard] rule sync failed', error));
+
+  return ruleSyncChain;
+}
+
+async function applyDynamicRules(current) {
   const existing = await chrome.declarativeNetRequest.getDynamicRules();
-  const removeRuleIds = existing.map((rule) => rule.id);
 
   // While protection is paused, or the policy is log-only, the browser-level rules come down
   // entirely; a pause has an absolute expiry, after which the next policy push or keepalive
   // puts them back.
   const addRules = (link.isPaused() || !link.isBlocking()) ? [] : buildRules(current);
+
+  // Drop the ids we are about to add as well as the ones already present. Chrome applies
+  // removals before additions within a single call, so listing both cannot collide even if an
+  // earlier update failed part way and left rules behind.
+  const removeRuleIds = Array.from(new Set(
+    existing.map((rule) => rule.id).concat(addRules.map((rule) => rule.id))
+  ));
 
   await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules });
   console.log('[guard]', addRules.length, 'dynamic rules active');
@@ -203,7 +228,7 @@ chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== KEEPALIVE_ALARM) return;
   if (!link.connected) link.connect();
-  if (policy) syncDynamicRules(policy).catch(() => {});
+  if (policy) syncDynamicRules(policy);
 });
 
 chrome.runtime.onStartup.addListener(() => link.start());

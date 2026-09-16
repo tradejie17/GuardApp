@@ -32,6 +32,14 @@
     Also block the browser's own extensions page, so the extension list cannot be inspected or
     tampered with. This blocks the page for every extension, not only Guard.
 
+.PARAMETER DisablePrivateBrowsing
+    Turn off incognito / InPrivate / private browsing entirely.
+
+    There is no policy that force-enables an extension inside an incognito window -- not even a
+    force-installed one runs there unless the user ticks "Allow in Incognito" themselves. So for
+    a self-control deployment the private window is not a gap to be covered, it is a door to be
+    removed, and removing it is strictly stronger than what an in-browser blocker can manage.
+
 .EXAMPLE
     .\configure-policies.ps1 -ChromeExtensionId abcdefghijklmnopabcdefghijklmnop
 #>
@@ -42,7 +50,8 @@ param(
     [string] $UpdateUrl = 'https://clients2.google.com/service/update2/crx',
     [string] $FirefoxExtensionId = 'guard@guard.local',
     [string] $FirefoxXpiPath,
-    [switch] $LockExtensionsPage
+    [switch] $LockExtensionsPage,
+    [switch] $DisablePrivateBrowsing
 )
 
 $ErrorActionPreference = 'Stop'
@@ -64,9 +73,10 @@ $extensionSettings = @{
     }
 } | ConvertTo-Json -Depth 5 -Compress
 
+# Chrome and Edge spell the private-browsing policy differently; 1 means Disabled in both.
 foreach ($browser in @(
-    @{ Name = 'Chrome'; Key = 'HKLM:\SOFTWARE\Policies\Google\Chrome' },
-    @{ Name = 'Edge';   Key = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' }
+    @{ Name = 'Chrome'; Key = 'HKLM:\SOFTWARE\Policies\Google\Chrome';  PrivateValue = 'IncognitoModeAvailability' },
+    @{ Name = 'Edge';   Key = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'; PrivateValue = 'InPrivateModeAvailability' }
 )) {
     Write-Host "Configuring $($browser.Name) policy..."
 
@@ -83,6 +93,11 @@ foreach ($browser in @(
         Set-ItemProperty -Path $blocklistKey -Name '2' -Value 'edge://extensions'
         Set-ItemProperty -Path $blocklistKey -Name '3' -Value 'about:addons'
     }
+
+    if ($DisablePrivateBrowsing) {
+        Set-PolicyValue -Key $browser.Key -Name $browser.PrivateValue -Value 1 -Type 'DWord'
+        Write-Host ("  private browsing disabled for {0}" -f $browser.Name)
+    }
 }
 
 # Avast Secure Browser reads Chromium policy from its own vendor key. Verify the path on the
@@ -94,6 +109,9 @@ if (Test-Path 'HKLM:\SOFTWARE\AVAST Software\Browser') {
     New-Item -Path $avastForcelist -Force | Out-Null
     Set-ItemProperty -Path $avastForcelist -Name '1' -Value "$ChromeExtensionId;$UpdateUrl"
     Set-PolicyValue -Key $avastKey -Name 'ExtensionSettings' -Value $extensionSettings
+    if ($DisablePrivateBrowsing) {
+        Set-PolicyValue -Key $avastKey -Name 'IncognitoModeAvailability' -Value 1 -Type 'DWord'
+    }
 } else {
     Write-Host 'Avast Secure Browser was not detected; skipping.' -ForegroundColor DarkGray
 }
@@ -116,8 +134,9 @@ if ($firefoxDir) {
                     install_url       = if ($FirefoxXpiPath) { "file:///$($FirefoxXpiPath -replace '\\','/')" } else { '' }
                 }
             }
-            DisableDeveloperTools = $false
-            BlockAboutAddons      = [bool] $LockExtensionsPage
+            DisableDeveloperTools  = $false
+            BlockAboutAddons       = [bool] $LockExtensionsPage
+            DisablePrivateBrowsing = [bool] $DisablePrivateBrowsing
         }
     }
 
