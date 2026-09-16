@@ -40,6 +40,14 @@ if (-not (Test-Path $hostExe)) {
     throw "Guard.NativeHost.exe was not found at $hostExe. Run install.ps1 first."
 }
 
+# The browser launches this executable as the logged-in user, not as an administrator, so it
+# needs read-and-execute on it as well as on the manifest.
+$hostAcl = icacls $hostExe
+if (-not ($hostAcl -match 'BUILTIN\\Users')) {
+    Write-Warning "No Users permission on $hostExe; the browser will not be able to launch it."
+    Write-Warning "Fix with: icacls '$InstallRoot' /reset /T /C"
+}
+
 New-Item -ItemType Directory -Path $manifestDir -Force | Out-Null
 
 # Chromium browsers identify the caller by extension id; Firefox by add-on id. The two manifest
@@ -63,12 +71,42 @@ $firefoxManifest = [ordered]@{
 $chromiumPath = Join-Path $manifestDir "$hostName.chromium.json"
 $firefoxPath  = Join-Path $manifestDir "$hostName.firefox.json"
 
-$chromiumManifest | ConvertTo-Json -Depth 4 | Set-Content -Path $chromiumPath -Encoding UTF8
-$firefoxManifest  | ConvertTo-Json -Depth 4 | Set-Content -Path $firefoxPath  -Encoding UTF8
+# Windows PowerShell 5.1 writes a UTF-8 BOM when told -Encoding UTF8, PowerShell 7 does not, and
+# Chrome rejects a manifest that starts with one -- surfacing it to the extension as "Specified
+# native messaging host not found", which points nowhere near the real cause. Write the bytes
+# directly so the result does not depend on which PowerShell ran the script.
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($chromiumPath, ($chromiumManifest | ConvertTo-Json -Depth 4), $utf8NoBom)
+[System.IO.File]::WriteAllText($firefoxPath,  ($firefoxManifest  | ConvertTo-Json -Depth 4), $utf8NoBom)
 
-# Only SYSTEM and Administrators may change a manifest; otherwise the restricted user could
-# point the host at a program of their own.
-icacls $manifestDir /inheritance:r /grant 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' /T | Out-Null
+foreach ($manifest in @($chromiumPath, $firefoxPath)) {
+    $head = [System.IO.File]::ReadAllBytes($manifest)[0..2]
+    if ($head[0] -eq 0xEF -and $head[1] -eq 0xBB -and $head[2] -eq 0xBF) {
+        throw "$manifest was written with a UTF-8 BOM; the browser will not be able to parse it."
+    }
+}
+
+# Permissions on the manifests: users must be able to READ them (the browser opens them as the
+# logged-in user) but not to CHANGE them (or the restricted user could repoint the host at a
+# program of their own). The ACL %ProgramFiles% already hands down is exactly that -- Users
+# read-and-execute, Administrators and SYSTEM full control -- so inheritance is restored rather
+# than replaced.
+#
+# An earlier version did this with `/inheritance:r /grant 'Administrators:(OI)(CI)F' /T`. (OI)
+# and (CI) are *inheritance* flags: applied to a file they produce an inherit-only ACE that
+# grants that file nothing. Combined with /inheritance:r stripping what the file did have, both
+# manifests ended up readable by nobody at all -- which the browser reports as "Specified native
+# messaging host not found", naming neither permissions nor the file.
+icacls $manifestDir /reset /T /C
+if ($LASTEXITCODE -ne 0) { throw "icacls failed on $manifestDir with exit code $LASTEXITCODE." }
+
+# Read the effective ACL of a manifest back. Checking the directory would not catch the bug
+# above, because there the inheritance flags are valid and the directory looks correct.
+$manifestAcl = icacls $chromiumPath
+if (-not ($manifestAcl -match 'BUILTIN\\Users')) {
+    throw "No Users read permission on $chromiumPath; the browser will not be able to read it. " +
+          "Run: icacls '$manifestDir' /reset /T /C"
+}
 
 $targets = @(
     @{ Browser = 'Chrome';                 Key = 'HKLM:\SOFTWARE\Google\Chrome\NativeMessagingHosts';          Manifest = $chromiumPath },

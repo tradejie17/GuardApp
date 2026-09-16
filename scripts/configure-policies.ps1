@@ -127,7 +127,14 @@ if ($firefoxDir) {
 
     $distribution = Join-Path $firefoxDir 'distribution'
     New-Item -ItemType Directory -Path $distribution -Force | Out-Null
-    $policies | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $distribution 'policies.json') -Encoding UTF8
+    # Written without a BOM for the same reason as the native messaging manifests: Windows
+    # PowerShell 5.1's -Encoding UTF8 adds one, and a policy file the browser cannot parse is
+    # silently ignored rather than reported.
+    $policiesPath = Join-Path $distribution 'policies.json'
+    [System.IO.File]::WriteAllText(
+        $policiesPath,
+        ($policies | ConvertTo-Json -Depth 8),
+        (New-Object System.Text.UTF8Encoding($false)))
 } else {
     Write-Host 'Firefox was not detected; skipping.' -ForegroundColor DarkGray
 }

@@ -87,7 +87,7 @@ Requires Windows 10/11, an elevated PowerShell prompt, and the [.NET 8 SDK](http
 
 ```powershell
 git clone <this repository>
-cd Guard-Windows
+cd GuardApp
 
 # 1. Build and install the service, native host and guardctl. Prompts for the admin password.
 .\scripts\install.ps1

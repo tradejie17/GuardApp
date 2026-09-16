@@ -19,6 +19,10 @@
 .PARAMETER SkipBuild
     Install from an existing publish output instead of building again.
 
+.PARAMETER SelfContained
+    Bundle the .NET runtime into the published binaries instead of relying on a machine-wide
+    .NET 8 installation. Larger on disk; useful where installing the runtime is not an option.
+
 .EXAMPLE
     .\install.ps1
 #>
@@ -26,10 +30,23 @@
 [CmdletBinding()]
 param(
     [string] $InstallRoot = "$env:ProgramFiles\Guard",
-    [switch] $SkipBuild
+    [switch] $SkipBuild,
+    [switch] $SelfContained
 )
 
 $ErrorActionPreference = 'Stop'
+
+# $ErrorActionPreference does not apply to native commands, so each one is checked by hand and
+# its output is left visible. A silenced icacls or sc.exe is how a broken installation gets to
+# look like a successful one.
+function Invoke-Checked {
+    param([string] $What, [scriptblock] $Command)
+
+    & $Command
+    if ($LASTEXITCODE -ne 0) {
+        throw "$What failed with exit code $LASTEXITCODE."
+    }
+}
 
 $serviceName = 'GuardService'
 $repoRoot    = Split-Path -Parent $PSScriptRoot
@@ -51,16 +68,24 @@ if ($existing -and $existing.Status -ne 'Stopped') {
 
 # --- 2. publish ------------------------------------------------------------------------------
 if (-not $SkipBuild) {
-    foreach ($project in 'Guard.Service', 'Guard.NativeHost', 'Guard.Cli') {
-        Write-Host "Publishing $project..."
-        & dotnet publish (Join-Path $repoRoot "src\$project\$project.csproj") `
-            --configuration Release `
-            --runtime win-x64 `
-            --self-contained false `
-            --output $InstallRoot `
-            /p:DebugType=None | Out-Null
+    $selfContainedArg = if ($SelfContained) { 'true' } else { 'false' }
 
-        if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed for $project." }
+    # The first publish on a machine is slow for reasons none of which are this script: a
+    # RID-specific NuGet restore, a cold MSBuild and Roslyn, and the virus scanner reading every
+    # file written into %ProgramFiles%. Minimal verbosity still shows progress, so a slow run is
+    # distinguishable from a stuck one.
+    foreach ($project in 'Guard.Service', 'Guard.NativeHost', 'Guard.Cli') {
+        Write-Host "Publishing $project..." -ForegroundColor Cyan
+
+        Invoke-Checked "dotnet publish ($project)" {
+            & dotnet publish (Join-Path $repoRoot "src\$project\$project.csproj") `
+                --configuration Release `
+                --runtime win-x64 `
+                --self-contained $selfContainedArg `
+                --output $InstallRoot `
+                --verbosity minimal `
+                /p:DebugType=None
+        }
     }
 }
 
@@ -69,39 +94,107 @@ foreach ($sub in 'config', 'secrets', 'logs') {
     New-Item -ItemType Directory -Path (Join-Path $dataRoot $sub) -Force | Out-Null
 }
 
-# The whole point of the ACL: the restricted user must not be able to edit the policy, read the
-# password verifier, or delete the logs. Inheritance is removed so nothing grants Users access.
-Write-Host 'Applying permissions to the data directory...'
-icacls $dataRoot /inheritance:r /grant 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' /T /Q | Out-Null
+# The whole point of this ACL: the restricted user must not be able to edit the policy, read the
+# password verifier, or delete the logs. %ProgramData% grants Users write access by default, so
+# inheritance genuinely has to come off here -- and the result has to be verified, because an
+# /inheritance:r whose /grant did not land leaves a directory nobody can use at all.
+# Applied in two passes, and the order matters. (OI) and (CI) are *inheritance* flags: valid on
+# a directory, meaningless on a file, where icacls turns them into an inherit-only ACE that
+# grants the file nothing. So `/grant 'Administrators:(OI)(CI)F' /T` over a directory that
+# already holds files locks those files away from everyone -- invisible on a first install where
+# the directory is still empty, and a broken reinstall the moment there is a guard.json.
+#
+# Instead: let every existing child inherit, then set the inheritable ACEs on the parent alone
+# and let Windows propagate them down.
+Write-Host 'Locking down the data directory...' -ForegroundColor Cyan
+Invoke-Checked 'icacls (data directory, restore inheritance)' {
+    icacls $dataRoot /reset /T /C
+}
+Invoke-Checked 'icacls (data directory, lock down)' {
+    icacls $dataRoot /inheritance:r /grant 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F'
+}
 
-# Program files: everyone may read and execute, only administrators may replace binaries.
-icacls $InstallRoot /inheritance:r `
-    /grant 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' 'Users:(OI)(CI)RX' /T /Q | Out-Null
+# Verify against a real file rather than the directory: the directory looks correct even in the
+# failure mode above, because there the inheritance flags are valid.
+$dataAcl = icacls $dataRoot
+if ($LASTEXITCODE -ne 0) { throw "icacls could not read the ACL on $dataRoot." }
+if (-not ($dataAcl -match 'BUILTIN\\Administrators')) {
+    throw "Locking down $dataRoot removed every permission on it. Run: icacls '$dataRoot' /reset /T /C"
+}
+
+$probe = Get-ChildItem $dataRoot -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($probe) {
+    $probeAcl = icacls $probe.FullName
+    if (-not ($probeAcl -match 'BUILTIN\\Administrators')) {
+        throw "$($probe.FullName) ended up with no usable permissions. Run: icacls '$dataRoot' /reset /T /C"
+    }
+}
+
+# %ProgramFiles% needs no such surgery: its default ACL is already SYSTEM and Administrators full
+# control plus Users read-and-execute, which is exactly what Guard wants. An earlier version of
+# this script stripped inheritance here and re-granted by hand; when that /grant did not fully
+# apply it produced binaries not even an administrator could launch, and the service failed to
+# start with nothing but 'Access is denied' to go on. The inherited ACL is verified now, not
+# replaced.
+Write-Host 'Verifying permissions on the program directory...' -ForegroundColor Cyan
+$installAcl = icacls $InstallRoot
+if ($LASTEXITCODE -ne 0) { throw "icacls could not read the ACL on $InstallRoot." }
+
+if (-not ($installAcl -match 'BUILTIN\\Administrators')) {
+    Write-Warning "No Administrators entry on $InstallRoot; restoring inherited permissions."
+    Invoke-Checked 'icacls (program directory reset)' { icacls $InstallRoot /reset /T /C }
+}
 
 # --- 4. register the service -----------------------------------------------------------------
 $serviceExe = Join-Path $InstallRoot 'Guard.Service.exe'
 if (-not (Test-Path $serviceExe)) { throw "Guard.Service.exe was not found at $serviceExe." }
 
 if ($existing) {
-    Write-Host 'Updating the existing service registration...'
-    & sc.exe config $serviceName binPath= "`"$serviceExe`"" start= auto obj= LocalSystem | Out-Null
+    Write-Host 'Updating the existing service registration...' -ForegroundColor Cyan
+    Invoke-Checked 'sc.exe config' {
+        & sc.exe config $serviceName binPath= "`"$serviceExe`"" start= auto obj= LocalSystem
+    }
 } else {
-    Write-Host 'Registering the Guard service...'
-    & sc.exe create $serviceName binPath= "`"$serviceExe`"" start= auto obj= LocalSystem `
-        DisplayName= 'Guard for Windows' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'sc.exe create failed.' }
+    Write-Host 'Registering the Guard service...' -ForegroundColor Cyan
+    Invoke-Checked 'sc.exe create' {
+        & sc.exe create $serviceName binPath= "`"$serviceExe`"" start= auto obj= LocalSystem `
+            DisplayName= 'Guard for Windows'
+    }
 }
 
-& sc.exe description $serviceName 'Monitors browser navigation for restricted keywords and enforces the configured policy.' | Out-Null
+Invoke-Checked 'sc.exe description' {
+    & sc.exe description $serviceName 'Monitors browser navigation for restricted keywords and enforces the configured policy.'
+}
 
 # Restart automatically if the process is killed, and never give up: stopping the service is one
 # of the obvious ways to try to switch protection off.
-& sc.exe failure $serviceName reset= 0 actions= restart/5000/restart/5000/restart/60000 | Out-Null
-& sc.exe failureflag $serviceName 1 | Out-Null
+Invoke-Checked 'sc.exe failure' {
+    & sc.exe failure $serviceName reset= 0 actions= restart/5000/restart/5000/restart/60000
+}
+Invoke-Checked 'sc.exe failureflag' { & sc.exe failureflag $serviceName 1 }
 
-Write-Host 'Starting the service...'
-Start-Service -Name $serviceName
-(Get-Service -Name $serviceName).WaitForStatus('Running', '00:00:30')
+Write-Host 'Starting the service...' -ForegroundColor Cyan
+try {
+    Start-Service -Name $serviceName
+    (Get-Service -Name $serviceName).WaitForStatus('Running', '00:00:30')
+}
+catch {
+    # Start-Service reports every failure with the same generic message, which on its own says
+    # nothing. Name the four commands that do.
+    Write-Host ''
+    Write-Warning "The service did not start: $($_.Exception.Message)"
+    Write-Host ''
+    Write-Host 'Run these from this elevated prompt to find out why:' -ForegroundColor Yellow
+    Write-Host "  sc.exe start $serviceName"
+    Write-Host '      5 = access denied (ACL or antivirus), 1053 = start timed out, 1067 = the process exited'
+    Write-Host "  & '$serviceExe'"
+    Write-Host '      runs it in this console, printing the startup error directly'
+    Write-Host "  icacls '$serviceExe'"
+    Write-Host '      confirm BUILTIN\Administrators and BUILTIN\Users are still on the binary'
+    Write-Host "  Get-Content '$dataRoot\logs\guard.log' -Tail 30"
+    Write-Host ''
+    throw
+}
 
 # --- 5. administrator password ----------------------------------------------------------------
 $guardctl = Join-Path $InstallRoot 'guardctl.exe'
