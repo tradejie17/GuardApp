@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "revision": 1,
+
+  "keywords": [
+    "example-restricted-word",
+    "another phrase"
+  ],
+
+  "blockedHosts": [
+    "example-blocked-site.com"
+  ],
+
+  "allowedHosts": [
+    "docs.example.com"
+  ],
+
+  "matching": {
+    "caseSensitive": false,
+    "decodeUrl": true,
+    "normalizeUnicode": true,
+    "checkHost": true,
+    "checkPath": true,
+    "checkQuery": true,
+    "checkFragment": true
+  },
+
+  "enforcement": {
+    "action": "Block",
+    "delaySeconds": 5,
+    "closeBrowser": false
+  },
+
+  "logging": {
+    "enabled": true,
+    "storeFullUrl": false,
+    "retentionDays": 30
+  }
+}

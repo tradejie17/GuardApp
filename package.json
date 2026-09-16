@@ -1,0 +1,11 @@
+{
+  "name": "guard-for-windows-extensions",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Browser extensions for Guard for Windows",
+  "scripts": {
+    "test": "node --test \"src/extension-shared/*.test.mjs\"",
+    "build": "node scripts/build-extensions.mjs",
+    "build:zip": "node scripts/build-extensions.mjs --zip"
+  }
+}

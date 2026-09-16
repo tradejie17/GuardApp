@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  dotnet:
+    name: .NET build and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # The detection engine and the message contracts are platform independent, so the build
+      # and the unit tests run on Linux. Windows-only behaviour (ACLs, the Service Control
+      # Manager, pipe security) is exercised by hand on a Windows machine; see docs/TESTING.md.
+      - run: dotnet build --configuration Release
+      - run: dotnet test --configuration Release --no-build --verbosity normal
+
+  extensions:
+    name: Extension tests and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - run: npm test
+      - run: npm run build

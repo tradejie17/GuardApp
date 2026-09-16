@@ -1,0 +1,15 @@
+# .NET build output
+bin/
+obj/
+*.user
+*.suo
+
+# Extension build output
+dist/
+node_modules/
+
+# Local runtime data (never commit a policy or a password verifier)
+*.log
+guard.json
+state.json
+admin.json

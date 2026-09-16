@@ -1,0 +1,30 @@
+{
+  "manifest_version": 2,
+  "name": "Guard",
+  "version": "1.0.0",
+  "description": "Blocks restricted keywords and sites. Managed by the Guard service on this computer.",
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "guard@guard.local",
+      "strict_min_version": "115.0"
+    }
+  },
+
+  "background": {
+    "scripts": ["guard-detect.js", "guard-link.js", "background.js"],
+    "persistent": true
+  },
+
+  "permissions": [
+    "<all_urls>",
+    "webRequest",
+    "webRequestBlocking",
+    "webNavigation",
+    "tabs",
+    "storage",
+    "nativeMessaging"
+  ],
+
+  "web_accessible_resources": ["blocked.html", "blocked.css", "blocked.js"]
+}

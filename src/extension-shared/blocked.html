@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blocked by Guard</title>
+  <link rel="stylesheet" href="blocked.css">
+</head>
+<body>
+  <main class="card" role="alert">
+    <div class="shield" aria-hidden="true">&#128274;</div>
+    <h1>This page was blocked</h1>
+    <p class="lede">Guard stopped this navigation because it matched a restricted rule.</p>
+
+    <dl class="details">
+      <div class="row"><dt>Matched rule</dt><dd id="keyword">&mdash;</dd></div>
+      <div class="row"><dt>Rule type</dt><dd id="ruleType">&mdash;</dd></div>
+      <div class="row"><dt>Time</dt><dd id="time">&mdash;</dd></div>
+    </dl>
+
+    <p class="note">
+      This restriction is managed by your system administrator and cannot be changed from the
+      browser. Settings are protected by the Guard service on this computer.
+    </p>
+  </main>
+  <script src="blocked.js"></script>
+</body>
+</html>
